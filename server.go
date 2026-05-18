@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/darkinno/gb32960-go-sdk/constant"
 )
 
 type Server struct {
@@ -17,6 +19,9 @@ type Server struct {
 	forwarders   []Forwarder
 	forwardMu    sync.RWMutex
 	timeProvider TimeProvider
+	cryptoProvider  CryptoProvider
+	platformHandler PlatformHandler
+	paramHandler    ParamHandler
 
 	maxConns    int
 	readTimeout  time.Duration
@@ -28,8 +33,8 @@ type Server struct {
 	connCount   atomic.Int64
 	vinRegistry *vinRegistry
 
-	logger *slog.Logger
-	logMu  sync.RWMutex
+	logger   *slog.Logger
+	logLevel slog.LevelVar
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -43,11 +48,12 @@ func NewServer(opts ...Option) *Server {
 		readTimeout: 5 * time.Minute,
 		writeTimeout: 10 * time.Second,
 		idleTimeout: 10 * time.Minute,
-		logger: slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-			Level: slog.LevelInfo,
-		})),
 		vinRegistry: newVinRegistry(),
 	}
+	s.logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: &s.logLevel,
+	}))
+	s.logLevel.Set(slog.LevelInfo)
 
 	for _, o := range opts {
 		o(s)
@@ -65,6 +71,11 @@ func (s *Server) Start() error {
 	}
 
 	s.logger.Info("server started", "addr", s.addr)
+
+	if s.idleTimeout > 0 {
+		s.wg.Add(1)
+		go s.idleCheckLoop()
+	}
 
 	for {
 		conn, err := s.listener.Accept()
@@ -150,11 +161,7 @@ func (s *Server) GetConnection(id string) *Connection {
 }
 
 func (s *Server) SetLogLevel(level slog.Level) {
-	s.logMu.Lock()
-	defer s.logMu.Unlock()
-	s.logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: level,
-	}))
+	s.logLevel.Set(level)
 }
 
 func (s *Server) unregister(c *Connection) {
@@ -171,11 +178,49 @@ func (s *Server) forward(ctx context.Context, msg interface{}) {
 	for _, f := range s.forwarders {
 		go func(fw Forwarder) {
 			if err := fw.Forward(ctx, msg); err != nil {
-				s.logMu.RLock()
-				logger := s.logger
-				s.logMu.RUnlock()
-				logger.Error("forward error", "error", err)
+				s.logger.Error("forward error", "error", err)
 			}
 		}(f)
+	}
+}
+
+func (s *Server) idleCheckLoop() {
+	defer s.wg.Done()
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		s.connections.Range(func(key, value interface{}) bool {
+			c, ok := value.(*Connection)
+			if !ok || c.State() == ConnClosed {
+				return true
+			}
+
+			if time.Since(c.LastSeen()) <= s.idleTimeout {
+				return true
+			}
+
+			if err := c.Send(constant.CmdHeartbeat, nil); err != nil {
+				s.logger.Warn("idle probe failed, closing", "conn_id", c.id, "error", err)
+				c.Close()
+				return true
+			}
+
+			time.Sleep(3 * time.Second)
+
+			if c.State() != ConnClosed && time.Since(c.LastSeen()) > s.idleTimeout+3*time.Second {
+				s.logger.Warn("idle connection closing", "conn_id", c.id, "last_seen", c.LastSeen())
+				c.Close()
+			}
+
+			return true
+		})
 	}
 }

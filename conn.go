@@ -33,8 +33,9 @@ type Connection struct {
 
 	writeMu   sync.Mutex
 
-	decoder   *Decoder
-	server    *Server
+	decoder    *Decoder
+	server     *Server
+	encryptKey []byte
 
 	logger    *slog.Logger
 	ctx       context.Context
@@ -55,6 +56,12 @@ func newConnection(id string, netConn net.Conn, server *Server) *Connection {
 	}
 	c.state.Store(int32(ConnNew))
 	c.lastSeen.Store(time.Now().Unix())
+
+	if tcpConn, ok := netConn.(*net.TCPConn); ok {
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	}
+
 	return c
 }
 
@@ -98,7 +105,17 @@ func (c *Connection) Send(command byte, data []byte) error {
 		c.conn.SetWriteDeadline(time.Now().Add(c.server.writeTimeout))
 	}
 
-	pkt, err := EncodeResponse(command, c.vin, constant.EncNone, data)
+	encType := byte(constant.EncNone)
+	if c.encryptKey != nil && len(data) > 0 {
+		var err error
+		data, err = EncryptAES128(data, c.encryptKey)
+		if err != nil {
+			return err
+		}
+		encType = constant.EncAES128
+	}
+
+	pkt, err := EncodeResponse(command, c.vin, encType, data)
 	if err != nil {
 		return err
 	}
@@ -113,6 +130,57 @@ func (c *Connection) sendLoginResponse(resp *LoginResponse) error {
 		return err
 	}
 	return c.Send(constant.CmdLogin, data)
+}
+
+func (c *Connection) SendPlatLogin(loginTime time.Time, username, password string) error {
+	data := encodeTime6(loginTime)
+	seq := make([]byte, 2)
+	data = append(data, seq...)
+	data = append(data, EncodeParamString(username)...)
+	data = append(data, EncodeParamString(password)...)
+	return c.Send(constant.CmdPlatLogin, data)
+}
+
+func (c *Connection) SendPlatLogout(logoutTime time.Time) error {
+	data := encodeTime6(logoutTime)
+	data = append(data, 0, 0)
+	return c.Send(constant.CmdPlatLogout, data)
+}
+
+func (c *Connection) SendParamQuery(paramIDs []uint32) error {
+	data := encodeTime6(time.Now())
+	data = append(data, byte(len(paramIDs)))
+	for _, id := range paramIDs {
+		buf := make([]byte, 4)
+		binaryPutUint32(buf, id)
+		data = append(data, buf...)
+	}
+	return c.Send(constant.CmdParamQuery, data)
+}
+
+func (c *Connection) SendParamSetting(params []ParamItem) error {
+	data := encodeTime6(time.Now())
+	data = append(data, byte(len(params)))
+	for _, p := range params {
+		buf := make([]byte, 4)
+		binaryPutUint32(buf, p.ID)
+		data = append(data, buf...)
+		data = append(data, byte(len(p.Value)))
+		data = append(data, p.Value...)
+	}
+	return c.Send(constant.CmdParamSetting, data)
+}
+
+func (c *Connection) sendParamQueryResponse(resp *ParamQueryResponse) error {
+	data := []byte{resp.Count}
+	for _, p := range resp.Params {
+		buf := make([]byte, 4)
+		binaryPutUint32(buf, p.ID)
+		data = append(data, buf...)
+		data = append(data, byte(len(p.Value)))
+		data = append(data, p.Value...)
+	}
+	return c.Send(constant.CmdParamQueryResp, data)
 }
 
 func (c *Connection) Close() {
@@ -181,6 +249,15 @@ func (c *Connection) handlePacket(pkt *Packet) {
 	ctx := c.ctx
 	h := c.server.handler
 
+	if pkt.EncryptType == constant.EncAES128 && c.encryptKey != nil {
+		data, err := DecryptAES128(pkt.Data, c.encryptKey)
+		if err != nil {
+			c.logger.Error("decrypt error", "error", err)
+			return
+		}
+		pkt.Data = data
+	}
+
 	switch pkt.Command {
 	case constant.CmdLogin:
 		if c.server.auth != nil {
@@ -216,6 +293,9 @@ func (c *Connection) handlePacket(pkt *Packet) {
 				if err := c.sendLoginResponse(resp); err != nil {
 					c.logger.Error("login response send error", "error", err)
 				}
+				if len(resp.Token) > 0 {
+					c.encryptKey = DeriveAESKey(resp.Token)
+				}
 			}
 		}
 
@@ -234,6 +314,8 @@ func (c *Connection) handlePacket(pkt *Packet) {
 				c.logger.Error("logout handler error", "error", err)
 			}
 		}
+
+		c.encryptKey = nil
 
 		c.server.forward(ctx, newForwardMsg("logout", pkt.VIN, logoutData))
 		c.logger.Info("vehicle logout", "vin", pkt.VIN)
@@ -292,6 +374,86 @@ func (c *Connection) handlePacket(pkt *Packet) {
 
 		data := encodeTime6(tp)
 		c.Send(constant.CmdTimeCalibr, data)
+
+	case constant.CmdPlatLogin:
+		ph := c.server.platformHandler
+		if ph == nil {
+			c.logger.Debug("platform login response ignored, no PlatformHandler")
+			return
+		}
+		msg, err := DecodePlatLoginResponse(pkt.Data)
+		if err != nil {
+			c.logger.Error("platform login response decode error", "error", err)
+			return
+		}
+		if err := ph.OnPlatLoginResponse(ctx, c, msg); err != nil {
+			c.logger.Error("platform login handler error", "error", err)
+		}
+
+	case constant.CmdPlatLogout:
+		ph := c.server.platformHandler
+		if ph == nil {
+			c.logger.Debug("platform logout response ignored, no PlatformHandler")
+			return
+		}
+		msg, err := DecodePlatLogoutResponse(pkt.Data)
+		if err != nil {
+			c.logger.Error("platform logout response decode error", "error", err)
+			return
+		}
+		if err := ph.OnPlatLogoutResponse(ctx, c, msg); err != nil {
+			c.logger.Error("platform logout handler error", "error", err)
+		}
+
+	case constant.CmdParamQuery:
+		pmh := c.server.paramHandler
+		if pmh == nil {
+			c.logger.Debug("param query ignored, no ParamHandler")
+			return
+		}
+		msg, err := DecodeParamQueryData(pkt.Data)
+		if err != nil {
+			c.logger.Error("param query decode error", "error", err)
+			return
+		}
+		resp, err := pmh.OnParamQuery(ctx, c, msg)
+		if err != nil {
+			c.logger.Error("param query handler error", "error", err)
+			return
+		}
+		if resp != nil {
+			c.sendParamQueryResponse(resp)
+		}
+
+	case constant.CmdParamQueryResp:
+		pmh := c.server.paramHandler
+		if pmh == nil {
+			c.logger.Debug("param query response ignored, no ParamHandler")
+			return
+		}
+		msg, err := DecodeParamQueryData(pkt.Data)
+		if err != nil {
+			c.logger.Error("param query response decode error", "error", err)
+			return
+		}
+		if err := pmh.OnParamQueryAck(ctx, c, msg); err != nil {
+			c.logger.Error("param query ack handler error", "error", err)
+		}
+
+	case constant.CmdParamSetting:
+		pmh := c.server.paramHandler
+		if pmh == nil {
+			c.logger.Debug("param setting response ignored, no ParamHandler")
+			return
+		}
+		msg, err := DecodeParamSettingData(pkt.Data)
+		if err != nil {
+			c.logger.Error("param setting decode error", "error", err)
+			return
+		}
+		if err := pmh.OnParamSettingAck(ctx, c, msg); err != nil {
+			c.logger.Error("param setting ack handler error", "error", err)
+		}
 
 	default:
 		c.logger.Debug("unknown command", "cmd", pkt.Command)
