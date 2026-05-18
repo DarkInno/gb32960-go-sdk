@@ -59,3 +59,21 @@ func WithTimeProvider(tp TimeProvider) Option {
 		s.timeProvider = tp
 	}
 }
+
+func WithCryptoProvider(cp CryptoProvider) Option {
+	return func(s *Server) {
+		s.cryptoProvider = cp
+	}
+}
+
+func WithPlatformHandler(ph PlatformHandler) Option {
+	return func(s *Server) {
+		s.platformHandler = ph
+	}
+}
+
+func WithParamHandler(pmh ParamHandler) Option {
+	return func(s *Server) {
+		s.paramHandler = pmh
+	}
+}

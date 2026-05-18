@@ -1,10 +1,6 @@
 package gb32960
 
-import (
-	"time"
-
-	"github.com/darkinno/gb32960-go-sdk/constant"
-)
+import "time"
 
 type Packet struct {
 	Command     byte
@@ -13,10 +9,6 @@ type Packet struct {
 	EncryptType byte
 	Data        []byte
 	Length      uint16
-}
-
-func (p *Packet) IsCommand() bool {
-	return p.Response != constant.RespSuccess
 }
 
 type ForwardMsg struct {
@@ -170,13 +162,37 @@ type ReissueMessage struct {
 	DataItems    []RealtimeMessage
 }
 
-type Vehicle struct {
-	VIN           string
-	ICCID         string
-	SessionID     string
-	LoginTime     time.Time
-	ConnectedAt   time.Time
-	RemoteAddr    string
-	LastSeen      time.Time
-	Valid         bool
+type PlatformLoginData struct {
+	LoginTime time.Time
+	Sequence  uint16
+	Username  string
+	Password  string
 }
+
+type PlatformLogoutData struct {
+	LogoutTime time.Time
+	Sequence   uint16
+}
+
+type ParamQueryData struct {
+	QueryTime time.Time
+	Count     byte
+	ParamIDs  []uint32
+}
+
+type ParamQueryResponse struct {
+	Count   byte
+	Params  []ParamItem
+}
+
+type ParamItem struct {
+	ID    uint32
+	Value []byte
+}
+
+type ParamSettingData struct {
+	SettingTime time.Time
+	Count       byte
+	Params      []ParamItem
+}
+

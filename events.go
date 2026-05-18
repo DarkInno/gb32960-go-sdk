@@ -20,3 +20,14 @@ type Handler interface {
 type TimeProvider interface {
 	OnTimeCalibration(ctx context.Context, conn *Connection) (time.Time, error)
 }
+
+type PlatformHandler interface {
+	OnPlatLoginResponse(ctx context.Context, conn *Connection, msg *PlatformLoginData) error
+	OnPlatLogoutResponse(ctx context.Context, conn *Connection, msg *PlatformLogoutData) error
+}
+
+type ParamHandler interface {
+	OnParamQuery(ctx context.Context, conn *Connection, msg *ParamQueryData) (*ParamQueryResponse, error)
+	OnParamQueryAck(ctx context.Context, conn *Connection, msg *ParamQueryData) error
+	OnParamSettingAck(ctx context.Context, conn *Connection, msg *ParamSettingData) error
+}
