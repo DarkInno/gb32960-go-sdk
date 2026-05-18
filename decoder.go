@@ -18,17 +18,13 @@ var (
 )
 
 type Decoder struct {
-	buf       []byte
-	pos       int
-	limit     int
-	packetBuf *[]byte
+	buf   []byte
+	pos   int
+	limit int
 }
 
 func NewDecoder() *Decoder {
-	return &Decoder{
-		buf:       nil,
-		packetBuf: getPacketBuffer(),
-	}
+	return &Decoder{}
 }
 
 func (d *Decoder) Reset() {
@@ -136,13 +132,11 @@ func calculateBCC(data []byte) byte {
 	return bcc
 }
 
-func (d *Decoder) Close() {
-	if d.packetBuf != nil {
-		putPacketBuffer(d.packetBuf)
-		d.packetBuf = nil
-	}
-}
+func (d *Decoder) Close() {}
 
+// EncodeResponse encodes a GB32960 response frame.
+// encryptType specifies the encryption type; if 0, EncNone is used.
+// data is the payload body (may be nil for empty responses).
 func EncodeResponse(command byte, vin string, encryptType byte, data []byte) ([]byte, error) {
 	if len(vin) != constant.VINLength {
 		return nil, ErrInvalidVIN
@@ -287,6 +281,113 @@ func encodeTime6(t time.Time) []byte {
 		byte(t.Minute()),
 		byte(t.Second()),
 	}
+}
+
+func binaryPutUint32(buf []byte, v uint32) {
+	binary.BigEndian.PutUint32(buf, v)
+}
+
+func binaryUint32(buf []byte) uint32 {
+	return binary.BigEndian.Uint32(buf)
+}
+
+func EncodeParamString(s string) []byte {
+	data := []byte(s)
+	out := make([]byte, 1+len(data))
+	out[0] = byte(len(data))
+	copy(out[1:], data)
+	return out
+}
+
+func decodeParamString(data []byte) (string, int) {
+	if len(data) < 1 {
+		return "", 0
+	}
+	length := int(data[0])
+	if 1+length > len(data) {
+		return "", 0
+	}
+	return string(data[1 : 1+length]), 1 + length
+}
+
+func DecodePlatLoginResponse(data []byte) (*PlatformLoginData, error) {
+	if len(data) < 8 {
+		return nil, fmt.Errorf("platform login data too short: %d bytes", len(data))
+	}
+	pos := 0
+	loginTime := parseTime6(data[pos : pos+6])
+	pos += 6
+	seq := binary.BigEndian.Uint16(data[pos : pos+2])
+	pos += 2
+	username, n := decodeParamString(data[pos:])
+	pos += n
+	password, _ := decodeParamString(data[pos:])
+	return &PlatformLoginData{
+		LoginTime: loginTime,
+		Sequence:  seq,
+		Username:  username,
+		Password:  password,
+	}, nil
+}
+
+func DecodePlatLogoutResponse(data []byte) (*PlatformLogoutData, error) {
+	if len(data) < 8 {
+		return nil, fmt.Errorf("platform logout data too short: %d bytes", len(data))
+	}
+	return &PlatformLogoutData{
+		LogoutTime: parseTime6(data[0:6]),
+		Sequence:   binary.BigEndian.Uint16(data[6:8]),
+	}, nil
+}
+
+func DecodeParamQueryData(data []byte) (*ParamQueryData, error) {
+	if len(data) < 7 {
+		return nil, fmt.Errorf("param query data too short: %d bytes", len(data))
+	}
+	pos := 0
+	queryTime := parseTime6(data[pos : pos+6])
+	pos += 6
+	count := data[pos]
+	pos++
+	msg := &ParamQueryData{
+		QueryTime: queryTime,
+		Count:     count,
+	}
+	for i := byte(0); i < count && pos+4 <= len(data); i++ {
+		msg.ParamIDs = append(msg.ParamIDs, binaryUint32(data[pos:pos+4]))
+		pos += 4
+	}
+	return msg, nil
+}
+
+func DecodeParamSettingData(data []byte) (*ParamSettingData, error) {
+	if len(data) < 7 {
+		return nil, fmt.Errorf("param setting data too short: %d bytes", len(data))
+	}
+	pos := 0
+	settingTime := parseTime6(data[pos : pos+6])
+	pos += 6
+	count := data[pos]
+	pos++
+	msg := &ParamSettingData{
+		SettingTime: settingTime,
+		Count:       count,
+	}
+	for i := byte(0); i < count && pos+5 <= len(data); i++ {
+		id := binaryUint32(data[pos : pos+4])
+		pos += 4
+		valLen := int(data[pos])
+		pos++
+		if pos+valLen > len(data) {
+			break
+		}
+		msg.Params = append(msg.Params, ParamItem{
+			ID:    id,
+			Value: append([]byte(nil), data[pos:pos+valLen]...),
+		})
+		pos += valLen
+	}
+	return msg, nil
 }
 
 
