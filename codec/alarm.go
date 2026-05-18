@@ -22,7 +22,7 @@ func DecodeAlarmData(data []byte) (interface{}, error) {
 	a.AlarmByteLen = binary.BigEndian.Uint32(data[pos : pos+4])
 	pos += 4
 	if int(a.AlarmByteLen) > len(data)-pos {
-		a.AlarmByteLen = uint32(len(data) - pos)
+		return nil, fmt.Errorf("alarm byte length %d exceeds data (%d bytes remaining)", a.AlarmByteLen, len(data)-pos)
 	}
 	a.AlarmBytes = make([]byte, a.AlarmByteLen)
 	copy(a.AlarmBytes, data[pos:pos+int(a.AlarmByteLen)])
