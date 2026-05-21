@@ -34,7 +34,7 @@
 ## 安装
 
 ```bash
-go get github.com/darkinno/gb32960-go-sdk
+go get github.com/darkinno/gb32960-go-sdk@v1.0.0
 ```
 
 ## 快速开始

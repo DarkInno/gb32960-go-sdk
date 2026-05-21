@@ -32,7 +32,7 @@
 ## Install
 
 ```bash
-go get github.com/darkinno/gb32960-go-sdk
+go get github.com/darkinno/gb32960-go-sdk@v1.0.0
 ```
 
 ## Quick Start
